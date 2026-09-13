@@ -61,12 +61,26 @@ impl App {
             // names a node (`[views."…"].node`) drills into it. Pods name one
             // too, but they drill into containers above.
             _ => {
+                // Argo CD: an Application or ApplicationSet opens the Argo CD
+                // view — sync, health, managed resources, what blocks — which
+                // is what a row of that kind is opened for; its YAML stays on
+                // `y`. Guarded by the API group like the CAPI arm below.
+                if matches!(
+                    self.kind_plural.as_str(),
+                    "applications" | "applicationsets"
+                ) && self
+                    .kind
+                    .as_ref()
+                    .is_some_and(|k| k.ar.group == "argoproj.io")
+                {
+                    self.open_argocd();
+                }
                 // Cluster API: MachineDeployment → Machines, same selector
                 // pattern as workload → pods. Guarded by the API group so a
                 // non-CAPI kind that happens to share the plural
                 // `machinedeployments` falls through to its configured drill
                 // or YAML instead of trying to open Cluster API Machines.
-                if self.kind_plural == "machinedeployments"
+                else if self.kind_plural == "machinedeployments"
                     && self
                         .kind
                         .as_ref()
