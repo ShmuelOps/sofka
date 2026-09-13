@@ -431,7 +431,8 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   with `esc` or `q` cancels pending results and clears the report progress
   message. Navigation to a target resource or a palette destination also
   cancels pending results.
-- **Argo CD view** (`:argocd` / `:argo`) - the state of the selected Application:
+- **Argo CD view** (`:argocd` / `:argo`, or `⏎` on an Application or
+  ApplicationSet row) - the state of the selected Application:
   sync and health, the project and destination, every source it deploys from with
   the revision actually deployed from that source, every object in
   `status.resources[]` with its own sync and health, and a summary of what is

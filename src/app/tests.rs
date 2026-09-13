@@ -24077,6 +24077,38 @@ async fn argocd_expansion_on_a_heading_does_nothing() {
     );
 }
 
+/// `⏎` on an Application row opens the Argo CD view, not its YAML: the view is
+/// what the row is opened for, and `y` still has the YAML. `esc` returns to
+/// the table.
+#[tokio::test]
+async fn enter_on_an_argocd_application_opens_the_argocd_view() {
+    let root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                         "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    assert_eq!(app.mode, Mode::Table);
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert_eq!(app.argocd_title, "web — Argo CD");
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert!(
+        app.argocd_items
+            .iter()
+            .any(|f| f.text.starts_with("Service/web:")),
+        "{:?}",
+        app.argocd_items.iter().map(|f| &f.text).collect::<Vec<_>>()
+    );
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
 /// `⏎` on a managed resource of an Application deploying to a cluster a
 /// kubeconfig context serves switches to that context and opens the object
 /// there, scoped by name, once the switch lands.
