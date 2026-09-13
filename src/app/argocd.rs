@@ -251,8 +251,9 @@ impl App {
             (Some(Action::Last), _) if len > 0 => self.argocd_state.select(Some(len - 1)),
             (Some(Action::Refresh), _) => self.refresh_argocd(),
             (Some(Action::DiscoverChildren), _) => self.toggle_argocd_children(),
-            // Lines for an Application deploying elsewhere carry no target, so
-            // this reports where the object lives rather than searching here.
+            // Lines for an Application deploying elsewhere carry no target;
+            // when a kubeconfig context serves that cluster the jump goes
+            // through it, otherwise this reports where the object lives.
             (Some(Action::Accept), _) => {
                 let selected = self
                     .argocd_state
@@ -260,7 +261,7 @@ impl App {
                     .and_then(|i| self.argocd_items.get(i));
                 match selected.and_then(|f| f.target.clone()) {
                     Some(t) => self.navigate_to_target(&t),
-                    None => self.flash_warn(&self.no_jump_reason()),
+                    None => self.jump_to_remote_managed_resource(),
                 }
             }
             _ => {}
@@ -270,12 +271,74 @@ impl App {
         }
     }
 
+    /// `⏎` on a managed resource of an Application deploying to a cluster some
+    /// kubeconfig context serves: switch to it and open the object once the
+    /// connection lands. The kind is resolved then, against the cluster that
+    /// holds it — this one may not know the CRD. Any other target-less line
+    /// reports why there is nothing to jump to.
+    fn jump_to_remote_managed_resource(&mut self) {
+        let Destination::Context(context) = self.argocd_destination.clone() else {
+            self.flash_warn(&self.no_jump_reason());
+            return;
+        };
+        let resource = self
+            .argocd_state
+            .selected()
+            .and_then(|i| self.managed_row_ordinal(i))
+            .and_then(|o| self.argocd_resources.get(o).cloned());
+        let Some(resource) = resource else {
+            self.flash_warn(&self.no_jump_reason());
+            return;
+        };
+        // Leave the view first: it describes the cluster being left, and the
+        // tail of `key_argocd` cancels its request on the mode change.
+        self.mode = self.return_mode;
+        self.switch_context(context);
+        self.pending_resource_query = None;
+        self.pending_bookmark = None;
+        self.pending_workspace = None;
+        self.pending_argocd_target = Some(resource);
+    }
+
+    /// The landing half of [`Self::jump_to_remote_managed_resource`]: the
+    /// switch to `context` is in, so open the object as a root view scoped to
+    /// its name. A kind this cluster does not know falls back to pods, and
+    /// says so.
+    pub(super) fn open_remote_managed_resource(
+        &mut self,
+        resource: crate::argocd::ManagedResource,
+        context: &str,
+    ) {
+        let Some(kind) = self
+            .cluster
+            .resolve_in_group(&resource.kind, &resource.group)
+        else {
+            if let Some(pods) = self.cluster.resolve("pods") {
+                self.set_root_view(pods);
+                self.record_history();
+                self.start_watch();
+            }
+            self.flash_warn(&format!("{context} has no {}; viewing pods", resource.kind));
+            return;
+        };
+        let title = kind.title();
+        self.set_root_view(kind);
+        if !resource.namespace.is_empty() {
+            self.namespace = resource.namespace.clone();
+        }
+        self.fields = Some(format!("metadata.name={}", resource.name));
+        self.scope_label = Some(resource.name.clone());
+        self.record_history();
+        self.start_watch();
+        self.set_flash(format!("Viewing {title}/{} in {context}", resource.name));
+    }
+
     /// Why `⏎` did nothing. A remote destination is a different answer from a
     /// line that never named a resource.
     fn no_jump_reason(&self) -> String {
         match &self.argocd_destination {
             Destination::Context(ctx) => {
-                format!("these resources live in {ctx}; switch with :ctx {ctx}")
+                format!("these resources live in {ctx}; ⏎ on a managed resource opens it there")
             }
             Destination::Unresolved(server) if !server.is_empty() => {
                 format!("these resources live in {server}, which no kubeconfig context serves")

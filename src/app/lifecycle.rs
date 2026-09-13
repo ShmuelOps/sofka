@@ -25,6 +25,7 @@ impl App {
             self.switch_context(context);
             self.pending_bookmark = None;
             self.pending_workspace = None;
+            self.pending_argocd_target = None;
             self.pending_resource_query = Some(query);
             return;
         }
@@ -328,6 +329,7 @@ impl App {
             self.pending_resource_query = None;
             self.pending_bookmark = None;
             self.pending_workspace = None;
+            self.pending_argocd_target = None;
         }
         self.applied_filter_labels = filter_labels;
         self.applied_filter_fields = filter_fields;
@@ -1797,6 +1799,7 @@ impl App {
                         self.pending_resource_query = None;
                         self.pending_bookmark = None;
                         self.pending_workspace = None;
+                        self.pending_argocd_target = None;
                         self.flash_warn(&format!("context switch failed: {e}"));
                         // Never connected anywhere yet — put the picker back up
                         // instead of stranding the user on an empty table.

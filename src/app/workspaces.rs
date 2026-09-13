@@ -54,6 +54,7 @@ impl App {
             self.switch_context(ctx);
             self.pending_resource_query = None;
             self.pending_bookmark = None;
+            self.pending_argocd_target = None;
             self.pending_workspace = Some(ws);
             return;
         }
