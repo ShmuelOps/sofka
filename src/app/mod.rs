@@ -1868,6 +1868,9 @@ pub struct App {
     /// developer's kubeconfig.
     #[cfg(test)]
     pub(super) context_index_override: Option<crate::k8s::ContextIndex>,
+    /// A managed resource of an Application deploying elsewhere, waiting for
+    /// the switch to its context to land so it can be opened there.
+    pending_argocd_target: Option<crate::argocd::ManagedResource>,
     pub command: String,
     pub cmd_suggestions: Vec<Suggestion>,
     pub cmd_sel: usize,
@@ -2350,6 +2353,7 @@ impl App {
             pending_resource_query: None,
             #[cfg(test)]
             context_index_override: None,
+            pending_argocd_target: None,
             command: String::new(),
             cmd_suggestions: Vec::new(),
             cmd_sel: 0,

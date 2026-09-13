@@ -834,6 +834,7 @@ impl App {
         self.pending_resource_query = None;
         self.pending_bookmark = None;
         self.pending_workspace = None;
+        self.pending_argocd_target = None;
         // Stop the current context's watches and clear stale rows while we
         // reconnect; the new watch starts when the connection lands. The rows
         // are stashed first — if the switch fails we stay on this context,
@@ -965,7 +966,9 @@ impl App {
         self.config_warnings.extend(plugin_warnings);
         self.config_warnings.extend(threshold_warnings);
         // Explicit destinations take priority over the previous resource type.
-        if let Some(mut query) = self.pending_resource_query.take() {
+        if let Some(resource) = self.pending_argocd_target.take() {
+            self.open_remote_managed_resource(resource, &name);
+        } else if let Some(mut query) = self.pending_resource_query.take() {
             query.context = None;
             self.apply_resource_query(query);
         } else if self.pending_workspace.is_some() {
