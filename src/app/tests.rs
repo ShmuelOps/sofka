@@ -24771,11 +24771,14 @@ async fn argocd_view_enter_on_a_remote_resource_opens_it_in_its_context() {
         app.flash
     );
     assert_eq!(
-        app.pending_argocd_target.as_ref().map(|r| r.name.as_str()),
+        app.pending_argocd_target
+            .as_ref()
+            .map(|j| j.resource.name.as_str()),
         Some("web")
     );
     assert_ne!(app.mode, Mode::Argocd);
 
+    let hub = app.cluster.context.clone();
     land_context(&mut app, "west");
     assert_eq!(app.cluster.context, "west");
     assert_eq!(app.mode, Mode::Table);
@@ -24784,6 +24787,105 @@ async fn argocd_view_enter_on_a_remote_resource_opens_it_in_its_context() {
     assert_eq!(app.fields.as_deref(), Some("metadata.name=web"));
     assert!(app.pending_argocd_target.is_none());
     assert!(app.flash.contains("in west"), "{}", app.flash);
+
+    // `esc` at the root of the jumped view goes back to the Application.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(hub.as_str()),
+        "{}",
+        app.flash
+    );
+    assert!(app.argocd_return.is_none());
+    land_context(&mut app, &hub);
+    assert_eq!(app.cluster.context, hub);
+    assert_eq!(app.mode, Mode::Argocd);
+    assert_eq!(app.argocd_title, "web — Argo CD");
+    assert_eq!(app.kind_plural, "applications");
+    assert_eq!(app.namespace, "default");
+    assert!(app.pending_argocd_return.is_none());
+}
+
+/// A kind the destination cluster does not know lands on pods with a warning
+/// — and `esc` from there still returns to the Application.
+#[tokio::test]
+async fn argocd_remote_jump_unknown_kind_falls_back_to_pods_and_esc_returns() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    // What Argo listed is a CRD the fake destination has never heard of.
+    app.argocd_resources[0].kind = "Widget".into();
+    app.argocd_resources[0].group = "example.com".into();
+    let hub = app.cluster.context.clone();
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    land_context(&mut app, "west");
+
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.flash.contains("west has no Widget"), "{}", app.flash);
+    assert!(
+        app.argocd_return.is_some(),
+        "the fallback view keeps the way back"
+    );
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(hub.as_str()),
+        "{}",
+        app.flash
+    );
+    land_context(&mut app, &hub);
+    assert_eq!(app.mode, Mode::Argocd);
+}
+
+/// Leaving the jumped view for another root view drops the way back: `esc`
+/// there is an ordinary root `esc`, not a context switch.
+#[tokio::test]
+async fn argocd_remote_jump_return_is_dropped_by_a_new_root_view() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    land_context(&mut app, "west");
+    assert!(app.argocd_return.is_some());
+
+    type_resource_query(&mut app, "pods");
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.argocd_return.is_none());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.context_switch_target.is_none());
+    assert_eq!(app.cluster.context, "west");
 }
 
 /// A heading or a source line under a remote destination still has nothing to
