@@ -6878,6 +6878,207 @@ fn argocd_appset_resume_without_annotation_defaults_to_sync() {
     assert!(p["metadata"].is_null() || p["metadata"]["annotations"].is_null());
 }
 
+fn rollout(spec: serde_json::Value, status: serde_json::Value) -> DynamicObject {
+    serde_json::from_value(json!({
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "Rollout",
+        "metadata": {"name": "web", "namespace": "default"},
+        "spec": spec, "status": status
+    }))
+    .unwrap()
+}
+
+/// The promote decision tree, case for case against the plugin's `getPatches`.
+#[test]
+fn rollout_promote_patches_follow_the_plugin() {
+    let canary = json!({"strategy": {"canary": {"steps": [
+        {"setWeight": 20}, {"pause": {}}, {"setWeight": 50}, {"pause": {}}
+    ]}}});
+    let unpause = json!({"spec": {"paused": false}});
+    let unified = json!({"spec": {"paused": false}, "status": {"pauseConditions": null}});
+
+    // Paused at a pause step: unpause is not needed, the conditions clear.
+    let p = rollout_promote_patches(
+        &rollout(
+            canary.clone(),
+            json!({"currentStepIndex": 1,
+            "pauseConditions": [{"reason": "CanaryPauseStep"}]}),
+        ),
+        false,
+    );
+    assert_eq!(p.spec, None);
+    assert_eq!(p.status, Some(json!({"status": {"pauseConditions": null}})));
+    assert_eq!(p.unified, Some(unified.clone()));
+
+    // `spec.paused` with no conditions, not a canary: only the spec half.
+    let p = rollout_promote_patches(&rollout(json!({"paused": true}), json!({})), false);
+    assert_eq!(p.spec, Some(unpause.clone()));
+    assert_eq!(p.status, None);
+    assert_eq!(p.unified, Some(unified.clone()));
+
+    // A canary mid-analysis with nothing paused steps to the next step.
+    let p = rollout_promote_patches(
+        &rollout(canary.clone(), json!({"currentStepIndex": 2})),
+        false,
+    );
+    assert_eq!(
+        p.status,
+        Some(json!({"status": {"pauseConditions": null, "currentStepIndex": 3}}))
+    );
+    assert_eq!(
+        p.unified,
+        Some(json!({"spec": {"paused": false},
+                    "status": {"pauseConditions": null, "currentStepIndex": 3}}))
+    );
+    // …but never past the last step, and an unset index counts as 0.
+    let p = rollout_promote_patches(
+        &rollout(canary.clone(), json!({"currentStepIndex": 4})),
+        false,
+    );
+    assert_eq!(p.status.unwrap()["status"]["currentStepIndex"], 4);
+    let p = rollout_promote_patches(&rollout(canary.clone(), json!({})), false);
+    assert_eq!(p.status.unwrap()["status"]["currentStepIndex"], 1);
+
+    // Inconclusive analysis under controller pause: clear both and step.
+    let p = rollout_promote_patches(
+        &rollout(
+            canary.clone(),
+            json!({"currentStepIndex": 1, "controllerPause": true,
+            "pauseConditions": [{"reason": "InconclusiveAnalysisRun"}],
+            "canary": {"currentStepAnalysisRunStatus": {"status": "Inconclusive"}}}),
+        ),
+        false,
+    );
+    assert_eq!(
+        p.status,
+        Some(
+            json!({"status": {"pauseConditions": null, "controllerPause": false,
+                               "currentStepIndex": 2}})
+        )
+    );
+
+    // Full: unpause when paused; promoteFull unless already on the stable RS.
+    let p = rollout_promote_patches(
+        &rollout(
+            json!({"paused": true}),
+            json!({"stableRS": "aaa", "currentPodHash": "bbb"}),
+        ),
+        true,
+    );
+    assert_eq!(p.spec, Some(unpause));
+    assert_eq!(p.status, Some(json!({"status": {"promoteFull": true}})));
+    assert_eq!(
+        p.unified,
+        Some(json!({"spec": {"paused": false}, "status": {"promoteFull": true}}))
+    );
+    let p = rollout_promote_patches(
+        &rollout(
+            json!({}),
+            json!({"stableRS": "aaa", "currentPodHash": "aaa"}),
+        ),
+        true,
+    );
+    assert_eq!(p.spec, None);
+    assert_eq!(p.status, None);
+}
+
+#[test]
+fn rollout_verb_patches_match_the_plugin() {
+    assert_eq!(
+        rollout_abort_patches().status,
+        Some(json!({"status": {"abort": true}}))
+    );
+    assert_eq!(
+        rollout_retry_patches().status,
+        Some(json!({"status": {"abort": false}}))
+    );
+    assert_eq!(
+        rollout_pause_patches().spec,
+        Some(json!({"spec": {"paused": true}}))
+    );
+    let p = rollout_restart_patches("2026-09-14T00:00:00Z");
+    assert_eq!(
+        p.spec,
+        Some(json!({"spec": {"restartAt": "2026-09-14T00:00:00Z"}}))
+    );
+    assert_eq!(p.status, None);
+}
+
+fn rollout_row(name: &str) -> serde_json::Value {
+    json!({
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "Rollout",
+        "metadata": {"name": name, "namespace": "default"},
+        "spec": {"selector": {"matchLabels": {"app": name}}, "paused": true}
+    })
+}
+
+/// `t` on a Rollout offers the Argo Rollouts verbs; picking one acts on the
+/// selection and reports it.
+#[tokio::test]
+async fn rollout_menu_offers_the_rollout_verbs_and_acts() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("rollouts");
+    apply(&mut app, rollout_row("web"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(app.action_menu_items(), ROLLOUT_MENU_ITEMS);
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // "Promote"
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("promoting web"), "{}", app.flash);
+
+    for (verb, expected) in [
+        ("Abort", "aborting web"),
+        ("Retry", "retrying web"),
+        ("Pause", "pausing web"),
+        ("Restart", "restarting web"),
+        ("Promote full", "promoting (full) web"),
+    ] {
+        app.handle_key(press(KeyCode::Char('t'))).unwrap();
+        let idx = ROLLOUT_MENU_ITEMS.iter().position(|s| *s == verb).unwrap();
+        app.flux_menu_state.select(Some(idx));
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert!(app.flash.contains(expected), "{verb}: {}", app.flash);
+    }
+}
+
+#[tokio::test]
+async fn rollout_menu_acts_on_marked_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("rollouts");
+    apply(&mut app, rollout_row("web"));
+    apply(&mut app, rollout_row("api"));
+    app.marked.insert("default/web".into());
+    app.marked.insert("default/api".into());
+
+    app.request_flux_menu();
+    let idx = ROLLOUT_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Abort")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("aborting 2 rollouts"), "{}", app.flash);
+    assert!(app.marked.is_empty());
+}
+
+/// `⏎` on a Rollout lists its pods by `spec.selector`, like a Deployment.
+#[tokio::test]
+async fn enter_on_a_rollout_drills_into_its_pods() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("rollouts");
+    apply(&mut app, rollout_row("web"));
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.labels.as_deref(), Some("app=web"));
+    assert_eq!(app.scope_label.as_deref(), Some("rollout/web"));
+    assert_eq!(app.stack.len(), 1);
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "rollouts");
+}
+
 #[test]
 fn argocd_sync_patch_sets_operation() {
     let p = argocd_sync_patch();

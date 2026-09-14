@@ -9,6 +9,89 @@ pub(super) enum ActionPatch {
     Scale(Value),
 }
 
+/// One verb of the Argo Rollouts action menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RolloutAction {
+    Promote { full: bool },
+    Pause,
+    Retry,
+    Abort,
+    Restart,
+}
+
+impl RolloutAction {
+    /// The journal's name for it.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Promote { full: false } => "promote",
+            Self::Promote { full: true } => "promote-full",
+            Self::Pause => "pause",
+            Self::Retry => "retry",
+            Self::Abort => "abort",
+            Self::Restart => "restart",
+        }
+    }
+
+    fn progress(self) -> &'static str {
+        match self {
+            Self::Promote { full: false } => "promoting",
+            Self::Promote { full: true } => "promoting (full)",
+            Self::Pause => "pausing",
+            Self::Retry => "retrying",
+            Self::Abort => "aborting",
+            Self::Restart => "restarting",
+        }
+    }
+
+    fn done(self) -> &'static str {
+        match self {
+            Self::Promote { .. } => "promote requested",
+            Self::Pause => "paused",
+            Self::Retry => "retry requested",
+            Self::Abort => "abort requested",
+            Self::Restart => "restart requested",
+        }
+    }
+}
+
+/// Send one Rollout verb's patches in the plugin's order: `status` via the
+/// subresource, or the unified patch on the object if there is no subresource
+/// (404), then `spec`.
+async fn apply_rollout_action(
+    api: &Api<DynamicObject>,
+    name: &str,
+    action: RolloutAction,
+) -> kube::Result<()> {
+    let patches = match action {
+        RolloutAction::Promote { full } => rollout_promote_patches(&api.get(name).await?, full),
+        RolloutAction::Abort => rollout_abort_patches(),
+        RolloutAction::Retry => rollout_retry_patches(),
+        RolloutAction::Pause => rollout_pause_patches(),
+        RolloutAction::Restart => {
+            rollout_restart_patches(&k8s_openapi::jiff::Timestamp::now().to_string())
+        }
+    };
+    let params = PatchParams::default();
+    let mut spec = patches.spec;
+    if let Some(status) = patches.status {
+        match api.patch_status(name, &params, &Patch::Merge(status)).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                let Some(unified) = patches.unified else {
+                    return Err(kube::Error::Api(e));
+                };
+                api.patch(name, &params, &Patch::Merge(unified)).await?;
+                spec = None;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if let Some(spec) = spec {
+        api.patch(name, &params, &Patch::Merge(spec)).await?;
+    }
+    Ok(())
+}
+
 impl From<Patch<Value>> for ActionPatch {
     fn from(patch: Patch<Value>) -> Self {
         Self::Resource(patch)
@@ -1797,8 +1880,12 @@ impl App {
         if self.deny_readonly() {
             return;
         }
-        if !self.flux_suspendable() && !self.cronjob_kind() && !self.argocd_kind() {
-            self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers), and ArgoCD Applications/ApplicationSets");
+        if !self.flux_suspendable()
+            && !self.cronjob_kind()
+            && !self.argocd_kind()
+            && !self.rollout_kind()
+        {
+            self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers), ArgoCD Applications/ApplicationSets, and Argo Rollouts");
             return;
         }
         if self.action_targets().is_empty() {
@@ -1848,6 +1935,21 @@ impl App {
                         self.do_argocd_sync(targets);
                     }
                     Some("Trigger now") => self.do_trigger_cronjobs(),
+                    Some(
+                        verb @ ("Promote" | "Promote full" | "Pause" | "Retry" | "Abort"
+                        | "Restart"),
+                    ) => {
+                        let action = match verb {
+                            "Promote" => RolloutAction::Promote { full: false },
+                            "Promote full" => RolloutAction::Promote { full: true },
+                            "Pause" => RolloutAction::Pause,
+                            "Retry" => RolloutAction::Retry,
+                            "Abort" => RolloutAction::Abort,
+                            _ => RolloutAction::Restart,
+                        };
+                        let targets = self.action_targets();
+                        self.do_rollout_action(targets, action);
+                    }
                     _ => {} // "Cancel" or nothing selected — do nothing.
                 }
             }
@@ -1998,6 +2100,73 @@ impl App {
                     Patch::Merge(argocd_appset_suspend_patch(&obj, suspend))
                 };
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    failed = true;
+                    let _ = tx
+                        .send(Msg::Flash {
+                            generation: genr,
+                            claim,
+                            message: format!("{verb} {name} failed: {e}"),
+                            err: true,
+                        })
+                        .await;
+                }
+            }
+            if !failed {
+                let _ = tx
+                    .send(Msg::Flash {
+                        generation: genr,
+                        claim,
+                        message: ok_message,
+                        err: false,
+                    })
+                    .await;
+            }
+        });
+    }
+
+    /// Drive an Argo Rollout the way `kubectl argo rollouts` does: merge
+    /// patches on `status` through the subresource — falling back to one
+    /// unified patch on the object when the subresource 404s — then on `spec`.
+    /// Promote reads the live object first: which fields to clear depends on
+    /// where the rollout is paused.
+    pub(super) fn do_rollout_action(
+        &mut self,
+        targets: Vec<(String, String)>,
+        action: RolloutAction,
+    ) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        if targets.is_empty() {
+            return; // see `do_flux_suspend`
+        }
+        let label = self.action_label(&targets);
+        self.note_action(action.noun(), label);
+        let verb = action.progress();
+        let progress = if targets.len() == 1 {
+            format!("{verb} {}…", targets[0].0)
+        } else {
+            format!("{verb} {} {}…", targets.len(), self.kind_plural)
+        };
+        let claim = self.claim_status(progress);
+        self.marked.clear();
+        let ok_message = if targets.len() == 1 {
+            format!("{}: {}", action.done(), targets[0].0)
+        } else {
+            format!("{}: {} {}", action.done(), targets.len(), self.kind_plural)
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let mut failed = false;
+            for (name, ns) in targets {
+                let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
+                    Api::namespaced_with(client.clone(), &ns, &kind.ar)
+                } else {
+                    Api::all_with(client.clone(), &kind.ar)
+                };
+                if let Err(e) = apply_rollout_action(&api, &name, action).await {
                     failed = true;
                     let _ = tx
                         .send(Msg::Flash {

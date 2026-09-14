@@ -61,12 +61,27 @@ impl App {
             // names a node (`[views."…"].node`) drills into it. Pods name one
             // too, but they drill into containers above.
             _ => {
+                // Argo Rollouts: a Rollout selects its pods like a Deployment
+                // does. Guarded by the API group like the CAPI arm below.
+                if self.kind_plural == "rollouts"
+                    && self
+                        .kind
+                        .as_ref()
+                        .is_some_and(|k| k.ar.group == "argoproj.io")
+                {
+                    match label_selector(&obj, "matchLabels") {
+                        Some(sel) => {
+                            self.drill_to_pods(ns, Some(sel), None, format!("rollout/{name}"))
+                        }
+                        None => self.flash_warn("no pod selector on this object"),
+                    }
+                }
                 // Cluster API: MachineDeployment → Machines, same selector
                 // pattern as workload → pods. Guarded by the API group so a
                 // non-CAPI kind that happens to share the plural
                 // `machinedeployments` falls through to its configured drill
                 // or YAML instead of trying to open Cluster API Machines.
-                if self.kind_plural == "machinedeployments"
+                else if self.kind_plural == "machinedeployments"
                     && self
                         .kind
                         .as_ref()

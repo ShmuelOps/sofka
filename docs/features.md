@@ -420,6 +420,14 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   `applicationsSync` to `create-only` (no `none` mode exists) and stashes the
   original value the same way. Sync-now patches the top-level `operation`
   field. No `argocd` binary needed. Works with bulk multiselect.
+- **Argo Rollouts controls** (`t` on a Rollout) - promote, promote full, pause,
+  retry, abort, restart: the same merge patches `kubectl argo rollouts` sends,
+  `status` through the status subresource (or one unified patch on the object
+  when the subresource is not served) and `spec` on the object. Promote reads
+  the live Rollout first and, like the plugin, unpauses `spec.paused`, clears
+  `status.pauseConditions`, and steps a canary past an inconclusive or
+  in-progress analysis. `⏎` on a Rollout lists its pods, as on a Deployment.
+  No plugin binary needed. Works with bulk multiselect.
 - **GitOps view** (`:gitops` / `:flux`) - the Flux ownership and reconciliation
   chain for the selection: the owning Kustomization/HelmRelease, its source
   (GitRepository/OCIRepository/HelmRepository) with applied and latest revision,

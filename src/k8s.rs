@@ -1212,6 +1212,8 @@ impl Cluster {
         // ArgoCD CRDs, for the `t` suspend/resume/sync menu.
         cluster.register_kind("argoproj.io", "Application", "applications", true);
         cluster.register_kind("argoproj.io", "ApplicationSet", "applicationsets", true);
+        // Argo Rollouts, for the `t` promote/abort/… menu and the pods drill.
+        cluster.register_kind("argoproj.io", "Rollout", "rollouts", true);
         // A second `events` kind, reachable only by its qualified name — the
         // bare plural stays with core, as `discover` would leave it.
         let events_k8s_io = Kind {

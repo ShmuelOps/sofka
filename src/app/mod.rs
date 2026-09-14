@@ -154,6 +154,20 @@ pub const ARGOCD_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Sync now", "Cance
 /// Application-level action.
 pub const ARGOCD_APPSET_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Cancel"];
 
+/// Items in the Argo Rollouts action menu (`t` on a Rollout), in display
+/// order — the verbs `kubectl argo rollouts` and the dashboard offer. Each is
+/// a merge patch on `status` (through the subresource) and/or `spec`, exactly
+/// as the plugin sends them; see `rollout_promote_patches` and friends.
+pub const ROLLOUT_MENU_ITEMS: &[&str] = &[
+    "Promote",
+    "Promote full",
+    "Pause",
+    "Retry",
+    "Abort",
+    "Restart",
+    "Cancel",
+];
+
 /// Items in the pod file-transfer menu (`t` on a pod), in display order. Both
 /// directions shell out to `kubectl cp` (which needs `tar` in the container),
 /// prompting for the source and destination paths.
