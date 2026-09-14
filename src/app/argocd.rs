@@ -148,7 +148,7 @@ impl App {
                     }
                     let findings =
                         argocd::describe_applicationset(&selection, &subject, &resources);
-                    return Ok((selection, findings, Destination::Current, resources));
+                    return Ok((selection, findings, Destination::Current, resources, None));
                 }
 
                 // Either the selection is the Application, or its tracking
@@ -207,19 +207,24 @@ impl App {
                     app,
                 };
                 let findings = argocd::describe(&ev, crate::columns::now_secs());
-                Ok((selection, findings, destination, ev.resources))
+                let application = ev.app.as_ref().and_then(|a| a.metadata.name.clone());
+                Ok((selection, findings, destination, ev.resources, application))
             }
             .await;
             // Not `report_result`: the destination travels with the findings so
             // the view can explain an absent jump target.
-            let (source, findings, destination, resources) = match gathered {
-                Ok((source, findings, destination, resources)) => {
-                    (Some(Box::new(source)), findings, destination, resources)
-                }
+            let (source, findings, destination, resources, application) = match gathered {
+                Ok((source, findings, destination, resources, application)) => (
+                    Some(Box::new(source)),
+                    findings,
+                    destination,
+                    resources,
+                    application,
+                ),
                 Err(error) => {
                     let mut findings = Vec::new();
                     prepend_warn_finding(&mut findings, Some(error));
-                    (None, findings, Destination::Current, Vec::new())
+                    (None, findings, Destination::Current, Vec::new(), None)
                 }
             };
             let _ = tx
@@ -232,6 +237,7 @@ impl App {
                     destination,
                     findings,
                     resources,
+                    application,
                 })
                 .await;
         });
@@ -281,8 +287,12 @@ impl App {
                     .argocd_state
                     .selected()
                     .and_then(|i| self.argocd_items.get(i));
+                let on_heading = selected.is_some_and(|f| {
+                    f.level == Level::Heading && f.text.starts_with("Managed resources")
+                });
                 match selected.and_then(|f| f.target.clone()) {
                     Some(t) => self.navigate_to_target(&t),
+                    None if on_heading => self.open_managed_workspace(),
                     None => self.jump_to_remote_managed_resource(),
                 }
             }
@@ -334,10 +344,60 @@ impl App {
         self.pending_argocd_target = Some(RemoteJump { resource, back });
     }
 
+    /// `⏎` on the "Managed resources" heading: everything the Application
+    /// manages as one workspace in the cluster that holds it — a live table
+    /// per kind, narrowed to the objects Argo listed, `Tab` cycling between
+    /// them. `esc` at a table's root comes back to this view.
+    pub(super) fn open_managed_workspace(&mut self) {
+        let Some(application) = self.argocd_application.clone() else {
+            self.flash_warn("no Application to build a workspace from");
+            return;
+        };
+        let context = match &self.argocd_destination {
+            Destination::Current => None,
+            Destination::Context(ctx) => Some(ctx.clone()),
+            Destination::Unresolved(_) => {
+                self.flash_warn(&self.no_jump_reason());
+                return;
+            }
+        };
+        let views = managed_workspace_views(&self.argocd_resources);
+        if views.is_empty() {
+            self.flash_warn("the Application manages nothing to show");
+            return;
+        }
+        let back = match (self.argocd_source.clone(), self.kind.clone()) {
+            (Some(source), Some(kind)) => ArgocdReturn {
+                context: self.cluster.context.clone(),
+                source,
+                kind,
+            },
+            _ => {
+                self.flash_warn("no Application to come back to");
+                return;
+            }
+        };
+        self.mode = self.return_mode;
+        self.open_workspace_returning(
+            crate::config::Workspace {
+                key: None,
+                name: format!("{application} managed resources"),
+                context,
+                views,
+            },
+            Some(back),
+        );
+    }
+
     /// `esc` at the root of the view a remote jump opened: switch back to the
     /// context the Argo CD view was on and reopen it there once the switch
-    /// lands.
+    /// lands. Already there (the workspace case in the local cluster): reopen
+    /// straight away.
     pub(super) fn return_to_argocd(&mut self, back: ArgocdReturn) {
+        if back.context == self.cluster.context && self.cluster.connected {
+            self.reopen_argocd(back);
+            return;
+        }
         self.switch_context(back.context.clone());
         self.pending_resource_query = None;
         self.pending_bookmark = None;
@@ -395,15 +455,23 @@ impl App {
         ));
     }
 
-    /// Whether `⏎` on row `index` goes somewhere: the row's own target, or a
+    /// Whether `⏎` on row `index` goes somewhere: the row's own target; a
     /// managed resource of an Application deploying to a cluster some
-    /// kubeconfig context serves, which jumps through that context.
+    /// kubeconfig context serves, which jumps through that context; or the
+    /// "Managed resources" heading, which opens them all as a workspace.
     pub fn argocd_row_jumps(&self, index: usize) -> bool {
-        self.argocd_items
-            .get(index)
-            .is_some_and(|f| f.target.is_some())
-            || (matches!(self.argocd_destination, Destination::Context(_))
-                && self.managed_row_ordinal(index).is_some())
+        let Some(finding) = self.argocd_items.get(index) else {
+            return false;
+        };
+        if finding.target.is_some() {
+            return true;
+        }
+        let reachable = !matches!(self.argocd_destination, Destination::Unresolved(_));
+        if finding.level == Level::Heading && finding.text.starts_with("Managed resources") {
+            return reachable && !self.argocd_resources.is_empty();
+        }
+        matches!(self.argocd_destination, Destination::Context(_))
+            && self.managed_row_ordinal(index).is_some()
     }
 
     /// Why `⏎` did nothing. A remote destination is a different answer from a
@@ -514,6 +582,68 @@ async fn claimed_by_prefix(
         "looking up Application {prefix}…: more than {} pages",
         PREFIX_SCAN_PAGES
     ))
+}
+
+/// One workspace view per kind the Application manages, in first-seen order,
+/// each a table of that kind narrowed to the objects Argo listed — by exact
+/// name (`name=a || name=b`), evaluated locally. Not by Argo's instance label:
+/// with annotation tracking Argo sets no label at all, and a Helm-rendered
+/// `app.kubernetes.io/instance` carries the release name, not the
+/// Application's. The namespace is the one all of that kind's objects share,
+/// all namespaces when they differ, and unset for cluster-scoped kinds. The
+/// resource is spelled `plural.group` when this cluster resolved the plural
+/// (exact across groups) and by kind otherwise — the table is opened in the
+/// destination cluster, which may know a CRD this one does not.
+pub(super) fn managed_workspace_views(
+    resources: &[argocd::ManagedResource],
+) -> Vec<crate::config::WorkspaceView> {
+    let mut kinds: Vec<(&str, &str)> = Vec::new();
+    for r in resources {
+        if !kinds.contains(&(r.kind.as_str(), r.group.as_str())) {
+            kinds.push((r.kind.as_str(), r.group.as_str()));
+        }
+    }
+    kinds
+        .into_iter()
+        .map(|(kind, group)| {
+            let of_kind: Vec<&argocd::ManagedResource> = resources
+                .iter()
+                .filter(|r| r.kind == kind && r.group == group)
+                .collect();
+            let plural = of_kind
+                .iter()
+                .find(|r| !r.plural.is_empty())
+                .map(|r| &r.plural);
+            let resource = match plural {
+                Some(p) if !group.is_empty() => format!("{p}.{group}"),
+                Some(p) => p.clone(),
+                None => kind.to_lowercase(),
+            };
+            let mut namespaces: Vec<&str> = of_kind.iter().map(|r| r.namespace.as_str()).collect();
+            namespaces.sort_unstable();
+            namespaces.dedup();
+            let namespace = match namespaces.as_slice() {
+                [""] => None,
+                [one] => Some((*one).to_string()),
+                _ => Some("all".to_string()),
+            };
+            let mut names: Vec<&str> = of_kind.iter().map(|r| r.name.as_str()).collect();
+            names.dedup();
+            let filter = names
+                .iter()
+                .map(|n| format!("name={n}"))
+                .collect::<Vec<_>>()
+                .join(" || ");
+            crate::config::WorkspaceView {
+                name: format!("{kind} ({})", of_kind.len()),
+                resource,
+                namespace,
+                filter: Some(filter),
+                sort: None,
+                view: None,
+            }
+        })
+        .collect()
 }
 
 /// Match `spec.destination` against the connected cluster, then the kubeconfig.

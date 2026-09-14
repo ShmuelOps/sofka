@@ -396,12 +396,17 @@ impl App {
                     // selectors, so the watch must widen back out.
                     self.sync_filter_selectors();
                     self.save_history_filter();
-                } else if !self.pop_frame()
-                    && let Some(back) = self.argocd_return.take()
-                {
-                    // At the root of a view a remote Argo CD jump opened:
+                } else if !self.pop_frame() {
+                    // At the root of a view the Argo CD view opened — by a
+                    // remote jump, or as the managed-resources workspace —
                     // back means back to the Application it came from.
-                    self.return_to_argocd(back);
+                    if let Some(back) = self.active_workspace.as_mut().and_then(|ws| ws.back.take())
+                    {
+                        self.active_workspace = None;
+                        self.return_to_argocd(back);
+                    } else if let Some(back) = self.argocd_return.take() {
+                        self.return_to_argocd(back);
+                    }
                 }
             }
             (Some(Action::RangeDown), _) => self.extend_selection(1),
