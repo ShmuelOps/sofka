@@ -24135,6 +24135,15 @@ async fn argocd_view_enter_on_a_remote_resource_opens_it_in_its_context() {
         .iter()
         .position(|f| f.text.starts_with("Service/web:"))
         .expect("managed resource row");
+    // The row is marked as a jump even though it carries no local target;
+    // the heading above it is not.
+    assert!(app.argocd_row_jumps(row));
+    let heading = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Managed resources"))
+        .expect("heading");
+    assert!(!app.argocd_row_jumps(heading));
     app.argocd_state.select(Some(row));
     app.handle_key(press(KeyCode::Enter)).unwrap();
 

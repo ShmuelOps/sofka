@@ -395,6 +395,17 @@ impl App {
         ));
     }
 
+    /// Whether `⏎` on row `index` goes somewhere: the row's own target, or a
+    /// managed resource of an Application deploying to a cluster some
+    /// kubeconfig context serves, which jumps through that context.
+    pub fn argocd_row_jumps(&self, index: usize) -> bool {
+        self.argocd_items
+            .get(index)
+            .is_some_and(|f| f.target.is_some())
+            || (matches!(self.argocd_destination, Destination::Context(_))
+                && self.managed_row_ordinal(index).is_some())
+    }
+
     /// Why `⏎` did nothing. A remote destination is a different answer from a
     /// line that never named a resource.
     fn no_jump_reason(&self) -> String {
