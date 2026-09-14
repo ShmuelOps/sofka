@@ -75,6 +75,21 @@ impl App {
                 {
                     self.open_argocd();
                 }
+                // Argo Rollouts: a Rollout selects its pods like a Deployment
+                // does. Same group guard.
+                else if self.kind_plural == "rollouts"
+                    && self
+                        .kind
+                        .as_ref()
+                        .is_some_and(|k| k.ar.group == "argoproj.io")
+                {
+                    match label_selector(&obj, "matchLabels") {
+                        Some(sel) => {
+                            self.drill_to_pods(ns, Some(sel), None, format!("rollout/{name}"))
+                        }
+                        None => self.flash_warn("no pod selector on this object"),
+                    }
+                }
                 // Cluster API: MachineDeployment → Machines, same selector
                 // pattern as workload → pods. Guarded by the API group so a
                 // non-CAPI kind that happens to share the plural

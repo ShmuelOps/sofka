@@ -2711,7 +2711,7 @@ fn build_help(app: &App, width: usize) -> (Vec<Line<'static>>, String) {
         } else if scope == "table" && action == Action::Logs {
             "logs (marked pods, or current row)"
         } else if scope == "table" && action == Action::ActionMenu {
-            "action menu: Flux suspend/resume/reconcile (HelmRelease: + force reconcile); Argo CD suspend/resume (Application: + sync); CronJobs trigger/suspend/resume; pods file transfer"
+            "action menu: Flux suspend/resume/reconcile (HelmRelease: + force reconcile); Argo CD suspend/resume (Application: + sync); Argo Rollouts promote/promote-full/pause/retry/abort/restart; CronJobs trigger/suspend/resume; pods file transfer"
         } else if scope == "port_forward_picker" && action == Action::Edit {
             "edit local port of the selected mapping"
         } else if action == Action::LogMarker {
@@ -3311,20 +3311,23 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!("{count} marked {}", app.kind_plural)
     };
-    let items: Vec<Text> = app
-        .action_menu_items()
-        .iter()
-        .map(|label| {
-            let color = match *label {
-                "Suspend" => theme::peach(),
-                "Resume" | "Trigger now" | "Sync now" => theme::green(),
-                _ => theme::overlay1(),
-            };
-            Text::from(Span::styled(*label, Style::default().fg(color)))
-        })
-        .collect();
+    let items: Vec<Text> =
+        app.action_menu_items()
+            .iter()
+            .map(|label| {
+                let color = match *label {
+                    "Suspend" | "Pause" | "Abort" => theme::peach(),
+                    "Resume" | "Trigger now" | "Sync now" | "Promote" | "Promote full"
+                    | "Retry" => theme::green(),
+                    _ => theme::overlay1(),
+                };
+                Text::from(Span::styled(*label, Style::default().fg(color)))
+            })
+            .collect();
     let subject = if app.cronjob_kind() {
         "CronJob"
+    } else if app.rollout_kind() {
+        "Argo Rollouts"
     } else if app.argocd_kind() {
         "ArgoCD"
     } else {

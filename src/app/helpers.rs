@@ -142,6 +142,130 @@ pub(super) fn argocd_sync_patch() -> Value {
     json!({ "operation": { "sync": {} } })
 }
 
+/// The merge patches one Argo Rollouts verb sends, split the way the plugin
+/// splits them: `status` goes through the status subresource, `spec` through
+/// the object, and `unified` is the single patch to send instead when the
+/// subresource is not there (404).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) struct RolloutPatches {
+    pub spec: Option<Value>,
+    pub status: Option<Value>,
+    pub unified: Option<Value>,
+}
+
+impl RolloutPatches {
+    fn spec_only(spec: Value) -> Self {
+        Self {
+            spec: Some(spec),
+            ..Self::default()
+        }
+    }
+
+    fn status_only(status: Value) -> Self {
+        Self {
+            unified: Some(status.clone()),
+            status: Some(status),
+            spec: None,
+        }
+    }
+}
+
+/// `kubectl argo rollouts promote [--full]`, from the live object.
+///
+/// Promote: unpause `spec.paused`; then, in the plugin's order of precedence,
+/// clear pause conditions and controller pause and step past an inconclusive
+/// analysis; or just clear the pause conditions; or, for a canary that is
+/// mid-analysis with nothing paused, step to the next step. Promote full:
+/// unpause, and set `status.promoteFull` unless the current pod hash is
+/// already the stable one.
+pub(super) fn rollout_promote_patches(obj: &DynamicObject, full: bool) -> RolloutPatches {
+    let data = &obj.data;
+    let paused = data.pointer("/spec/paused").and_then(Value::as_bool) == Some(true);
+    let steps = data
+        .pointer("/spec/strategy/canary/steps")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    // `GetCurrentCanaryStep`: a canary with steps has an index (0 when the
+    // status has none yet), stepped past the end when done.
+    let next_step = steps.map(|len| {
+        let index = data
+            .pointer("/status/currentStepIndex")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        if index < len { index + 1 } else { index }
+    });
+    let pause_conditions = data
+        .pointer("/status/pauseConditions")
+        .and_then(Value::as_array)
+        .is_some_and(|c| !c.is_empty());
+    let unpause = json!({"spec": {"paused": false}});
+
+    if full {
+        let stable = data.pointer("/status/stableRS").and_then(Value::as_str);
+        let current = data
+            .pointer("/status/currentPodHash")
+            .and_then(Value::as_str);
+        return RolloutPatches {
+            spec: paused.then(|| unpause.clone()),
+            status: (current != stable).then(|| json!({"status": {"promoteFull": true}})),
+            unified: Some(json!({"spec": {"paused": false}, "status": {"promoteFull": true}})),
+        };
+    }
+
+    let inconclusive = data.pointer("/spec/strategy/canary").is_some()
+        && data
+            .pointer("/status/canary/currentStepAnalysisRunStatus/status")
+            .and_then(Value::as_str)
+            == Some("Inconclusive");
+    let controller_pause = data
+        .pointer("/status/controllerPause")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let mut patches = RolloutPatches {
+        spec: paused.then(|| unpause.clone()),
+        status: None,
+        unified: Some(json!({"spec": {"paused": false}, "status": {"pauseConditions": null}})),
+    };
+    if inconclusive && pause_conditions && controller_pause {
+        if let Some(step) = next_step {
+            patches.status = Some(json!({"status": {
+                "pauseConditions": null, "controllerPause": false, "currentStepIndex": step
+            }}));
+        }
+    } else if pause_conditions {
+        patches.status = Some(json!({"status": {"pauseConditions": null}}));
+    } else if let Some(step) = next_step {
+        patches.status =
+            Some(json!({"status": {"pauseConditions": null, "currentStepIndex": step}}));
+        patches.unified = Some(json!({
+            "spec": {"paused": false},
+            "status": {"pauseConditions": null, "currentStepIndex": step}
+        }));
+    }
+    patches
+}
+
+/// `kubectl argo rollouts abort`.
+pub(super) fn rollout_abort_patches() -> RolloutPatches {
+    RolloutPatches::status_only(json!({"status": {"abort": true}}))
+}
+
+/// `kubectl argo rollouts retry rollout`.
+pub(super) fn rollout_retry_patches() -> RolloutPatches {
+    RolloutPatches::status_only(json!({"status": {"abort": false}}))
+}
+
+/// `kubectl argo rollouts pause`.
+pub(super) fn rollout_pause_patches() -> RolloutPatches {
+    RolloutPatches::spec_only(json!({"spec": {"paused": true}}))
+}
+
+/// `kubectl argo rollouts restart`: the controller restarts every pod whose
+/// creation predates `restartAt`.
+pub(super) fn rollout_restart_patches(restart_at: &str) -> RolloutPatches {
+    RolloutPatches::spec_only(json!({"spec": {"restartAt": restart_at}}))
+}
+
 pub(super) fn external_secret_refresh_patch(force_sync: &str) -> Value {
     json!({
         "metadata": { "annotations": { "force-sync": force_sync } }
@@ -440,10 +564,21 @@ impl App {
         self.kind_plural == "cronjobs"
     }
 
+    /// Whether the current kind is an Argo Rollout (`argoproj.io`).
+    pub fn rollout_kind(&self) -> bool {
+        self.kind_plural == "rollouts"
+            && self
+                .kind
+                .as_ref()
+                .is_some_and(|k| k.ar.group == ARGOCD_GROUP)
+    }
+
     /// The items shown in the `t` action menu for the current kind.
     pub fn action_menu_items(&self) -> &'static [&'static str] {
         if self.cronjob_kind() {
             CRONJOB_MENU_ITEMS
+        } else if self.rollout_kind() {
+            ROLLOUT_MENU_ITEMS
         } else if self.argocd_app_kind() {
             ARGOCD_MENU_ITEMS
         } else if self.argocd_kind() {
