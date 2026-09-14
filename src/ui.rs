@@ -1092,8 +1092,28 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
     if app.flux_suspendable() {
         lines.push(hint_line(app, &[(Action::ActionMenu, "flux menu")]));
     }
+    // Argo CD rows open the Argo CD view on `enter` and have their own `t`
+    // menu.
     if app.argocd_kind() {
-        lines.push(hint_line(app, &[(Action::ActionMenu, "suspend/sync")]));
+        lines = vec![
+            hint_line(
+                app,
+                &[
+                    (Action::Open, "argocd"),
+                    (Action::Yaml, "yaml"),
+                    (Action::Describe, "describe"),
+                ],
+            ),
+            hint_line(
+                app,
+                &[
+                    (Action::Edit, "edit"),
+                    (Action::Events, "events"),
+                    (Action::Delete, "delete"),
+                ],
+            ),
+            hint_line(app, &[(Action::ActionMenu, "suspend/sync")]),
+        ];
     }
     if app.kind_plural == "helmreleases" {
         lines.push(hint_line(app, &[(Action::Open, "helm history")]));
@@ -6080,6 +6100,30 @@ mod tests {
             height: 5,
         };
         assert_eq!(centered_rect_with_min(50, 20, 56, 7, tiny), tiny);
+    }
+
+    /// The header names what `enter` and `t` do on an Argo CD Application,
+    /// since neither is the generic yaml / refused-menu default.
+    #[tokio::test]
+    async fn header_hints_name_the_argocd_drill_and_menu() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut app = App::new(crate::k8s::Cluster::fake(), tx);
+        let text = |lines: &[Line<'_>]| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        app.switch_kind("applications");
+        let hints = text(&header_hints(&app));
+        assert!(hints.contains("argocd"), "{hints}");
+        assert!(hints.contains("suspend/sync"), "{hints}");
     }
 
     #[tokio::test]
