@@ -407,6 +407,9 @@ pub struct ActiveWorkspace {
     pub name: String,
     pub views: Vec<crate::config::WorkspaceView>,
     pub index: usize,
+    /// For a workspace the Argo CD view opened: `esc` at a view's root leaves
+    /// the workspace and reopens that view.
+    back: Option<argocd::ArgocdReturn>,
 }
 
 /// How a plugin's output is delivered.
@@ -2212,6 +2215,12 @@ pub struct App {
     /// The inspected Application's managed resources, kept for their API
     /// groups.
     pub argocd_resources: Vec<crate::argocd::ManagedResource>,
+    /// The Application the view describes, when the gather found one.
+    pub argocd_application: Option<String>,
+    /// Where `esc` from the next workspace to open should return: set by the
+    /// Argo CD view when it opens the managed resources as a workspace, taken
+    /// by `start_workspace`.
+    workspace_return: Option<argocd::ArgocdReturn>,
     /// Managed-resource rows whose `ownerReferences` descendants are shown
     /// inline, keyed by position in `status.resources[]` and carrying the
     /// request that may fill them, so a superseded expansion is dropped.
@@ -2526,6 +2535,8 @@ impl App {
             argocd_request: 0,
             argocd_claim: None,
             argocd_resources: Vec::new(),
+            argocd_application: None,
+            workspace_return: None,
             argocd_expanded: HashMap::new(),
             argocd_children_request: 0,
             argocd_children_claims: Vec::new(),

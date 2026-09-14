@@ -44,6 +44,17 @@ impl App {
     /// Open a workspace: switch its context first (deferred, if it differs),
     /// then land on the first view and start cycling.
     pub(super) fn open_workspace(&mut self, ws: crate::config::Workspace) {
+        self.open_workspace_returning(ws, None);
+    }
+
+    /// [`Self::open_workspace`] with somewhere for `esc` to go back to — the
+    /// Argo CD view that built the workspace. `None` for a configured
+    /// workspace, which also clears anything an abandoned one left behind.
+    pub(super) fn open_workspace_returning(
+        &mut self,
+        ws: crate::config::Workspace,
+        back: Option<argocd::ArgocdReturn>,
+    ) {
         if ws.views.is_empty() {
             self.flash_warn(&format!("workspace '{}' has no views", ws.name));
             return;
@@ -57,8 +68,11 @@ impl App {
             self.pending_argocd_target = None;
             self.pending_argocd_return = None;
             self.pending_workspace = Some(ws);
+            // After the switch, which clears the slot.
+            self.workspace_return = back;
             return;
         }
+        self.workspace_return = back;
         self.start_workspace(ws);
     }
 
@@ -68,6 +82,7 @@ impl App {
             name: ws.name,
             views: ws.views,
             index: 0,
+            back: self.workspace_return.take(),
         });
         self.apply_active_view();
     }

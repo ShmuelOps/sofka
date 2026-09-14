@@ -836,6 +836,7 @@ impl App {
         self.pending_workspace = None;
         self.pending_argocd_target = None;
         self.pending_argocd_return = None;
+        self.workspace_return = None;
         // Stop the current context's watches and clear stale rows while we
         // reconnect; the new watch starts when the connection lands. The rows
         // are stashed first — if the switch fails we stay on this context,

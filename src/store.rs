@@ -161,6 +161,9 @@ pub enum Msg {
         /// Kept so an expansion can resolve a managed resource in its own API
         /// group; a plural on its own is ambiguous across groups.
         resources: Vec<crate::argocd::ManagedResource>,
+        /// The Application's name — the value of Argo's instance label on
+        /// everything it manages.
+        application: Option<String>,
     },
     /// What is making an Application unhealthy, found by walking its managed
     /// resources when its own status does not say.

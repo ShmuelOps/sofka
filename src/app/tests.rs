@@ -24077,6 +24077,177 @@ async fn argocd_expansion_on_a_heading_does_nothing() {
     );
 }
 
+/// `⏎` on the "Managed resources" heading of a local Application opens its
+/// managed kinds as a workspace, narrowed by the instance label; `esc` at the
+/// table's root returns to the Argo CD view.
+#[tokio::test]
+async fn argocd_managed_resources_heading_opens_a_workspace_and_esc_returns() {
+    let root = argocd_application(json!({"server": "https://kubernetes.default.svc",
+                                         "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert_eq!(app.argocd_application.as_deref(), Some("web"));
+
+    let heading = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Managed resources"))
+        .expect("heading");
+    app.argocd_state.select(Some(heading));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "services");
+    assert_eq!(app.namespace, "default");
+    assert_eq!(app.filter, "name=web");
+    let ws = app.active_workspace.as_ref().expect("workspace");
+    assert_eq!(ws.name, "web managed resources");
+    assert_eq!(ws.views.len(), 1);
+    assert!(ws.back.is_some());
+    assert!(app.flash.contains("[1/1]"), "{}", app.flash);
+
+    // `esc` clears the filter first (ordinary root rules), then goes back.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.filter.is_empty());
+    assert_eq!(app.mode, Mode::Table);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.active_workspace.is_none());
+    assert_eq!(app.kind_plural, "applications");
+}
+
+/// For a remote destination the workspace opens in that context once the
+/// switch lands, and `esc` switches back and reopens the view.
+#[tokio::test]
+async fn argocd_managed_resources_workspace_follows_a_remote_destination() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    let hub = app.cluster.context.clone();
+
+    let heading = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Managed resources"))
+        .expect("heading");
+    app.argocd_state.select(Some(heading));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some("west"),
+        "{}",
+        app.flash
+    );
+    assert!(app.pending_workspace.is_some());
+
+    land_context(&mut app, "west");
+    assert_eq!(app.cluster.context, "west");
+    assert_eq!(app.kind_plural, "services");
+    assert_eq!(app.filter, "name=web");
+    assert!(
+        app.active_workspace
+            .as_ref()
+            .is_some_and(|ws| ws.back.is_some())
+    );
+
+    app.handle_key(press(KeyCode::Esc)).unwrap(); // filter
+    app.handle_key(press(KeyCode::Esc)).unwrap(); // back
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(hub.as_str()),
+        "{}",
+        app.flash
+    );
+    assert!(app.active_workspace.is_none());
+    land_context(&mut app, &hub);
+    assert_eq!(app.mode, Mode::Argocd);
+    assert_eq!(app.argocd_title, "web — Argo CD");
+}
+
+/// One view per kind, first-seen order, filtered to that kind's names; a
+/// shared namespace is kept, mixed namespaces widen to all, cluster-scoped
+/// kinds get none; the resource is qualified by group when the plural is
+/// known.
+#[test]
+fn managed_workspace_views_group_by_kind() {
+    use crate::argocd::ManagedResource;
+    let r = |kind: &str, group: &str, ns: &str, name: &str, plural: &str| ManagedResource {
+        kind: kind.into(),
+        group: group.into(),
+        namespace: ns.into(),
+        name: name.into(),
+        sync: String::new(),
+        health: String::new(),
+        plural: plural.into(),
+    };
+    let resources = vec![
+        r("Service", "", "arena", "web", "services"),
+        r("Rollout", "argoproj.io", "arena", "web", ""),
+        r("Service", "", "arena", "web-preview", "services"),
+        r("ConfigMap", "", "arena", "a", "configmaps"),
+        r("ConfigMap", "", "shared", "b", "configmaps"),
+        r(
+            "ClusterRole",
+            "rbac.authorization.k8s.io",
+            "",
+            "web",
+            "clusterroles",
+        ),
+    ];
+    let views = super::argocd::managed_workspace_views(&resources);
+    let summary: Vec<(String, String, Option<String>)> = views
+        .iter()
+        .map(|v| (v.name.clone(), v.resource.clone(), v.namespace.clone()))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "Service (2)".into(),
+                "services".into(),
+                Some("arena".into())
+            ),
+            ("Rollout (1)".into(), "rollout".into(), Some("arena".into())),
+            (
+                "ConfigMap (2)".into(),
+                "configmaps".into(),
+                Some("all".into())
+            ),
+            (
+                "ClusterRole (1)".into(),
+                "clusterroles.rbac.authorization.k8s.io".into(),
+                None
+            ),
+        ]
+    );
+    let filters: Vec<&str> = views.iter().filter_map(|v| v.filter.as_deref()).collect();
+    assert_eq!(
+        filters,
+        vec![
+            "name=web || name=web-preview",
+            "name=web",
+            "name=a || name=b",
+            "name=web",
+        ]
+    );
+}
+
 /// `⏎` on an Application row opens the Argo CD view, not its YAML: the view is
 /// what the row is opened for, and `y` still has the YAML. `esc` returns to
 /// the table.
@@ -24135,15 +24306,22 @@ async fn argocd_view_enter_on_a_remote_resource_opens_it_in_its_context() {
         .iter()
         .position(|f| f.text.starts_with("Service/web:"))
         .expect("managed resource row");
-    // The row is marked as a jump even though it carries no local target;
-    // the heading above it is not.
+    // The row is marked as a jump even though it carries no local target,
+    // and so is the heading above it (it opens the workspace); another
+    // heading is not.
     assert!(app.argocd_row_jumps(row));
     let heading = app
         .argocd_items
         .iter()
         .position(|f| f.text.starts_with("Managed resources"))
         .expect("heading");
-    assert!(!app.argocd_row_jumps(heading));
+    assert!(app.argocd_row_jumps(heading));
+    let source = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "Source")
+        .expect("source heading");
+    assert!(!app.argocd_row_jumps(source));
     app.argocd_state.select(Some(row));
     app.handle_key(press(KeyCode::Enter)).unwrap();
 

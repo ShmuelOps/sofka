@@ -1355,9 +1355,11 @@ impl App {
                 destination,
                 findings,
                 resources,
+                application,
             } if generation == self.generation && request == self.argocd_request => {
                 self.argocd_claim = None;
                 self.argocd_resources = resources;
+                self.argocd_application = application;
                 if let Some(source) = source {
                     self.argocd_source = Some(*source);
                 }
@@ -1804,6 +1806,7 @@ impl App {
                         self.pending_workspace = None;
                         self.pending_argocd_target = None;
                         self.pending_argocd_return = None;
+                        self.workspace_return = None;
                         self.flash_warn(&format!("context switch failed: {e}"));
                         // Never connected anywhere yet — put the picker back up
                         // instead of stranding the user on an empty table.
