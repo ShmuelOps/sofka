@@ -1860,6 +1860,14 @@ pub struct App {
     /// developer's kubeconfig.
     #[cfg(test)]
     pub(super) context_index_override: Option<crate::k8s::ContextIndex>,
+    /// A remote managed resource to open once the context switch lands.
+    pending_argocd_target: Option<argocd::RemoteJump>,
+    /// While the view a remote jump opened is on screen: where `esc` goes back to.
+    argocd_return: Option<argocd::ArgocdReturn>,
+    /// The Argo CD view to reopen once the switch back lands.
+    pending_argocd_return: Option<argocd::ArgocdReturn>,
+    /// The managed row to select when the reopened Argo CD view reports.
+    argocd_reselect: Option<usize>,
     pub command: String,
     pub cmd_suggestions: Vec<Suggestion>,
     pub cmd_sel: usize,
@@ -2348,6 +2356,10 @@ impl App {
             pending_resource_query: None,
             #[cfg(test)]
             context_index_override: None,
+            pending_argocd_target: None,
+            argocd_return: None,
+            pending_argocd_return: None,
+            argocd_reselect: None,
             command: String::new(),
             cmd_suggestions: Vec::new(),
             cmd_sel: 0,

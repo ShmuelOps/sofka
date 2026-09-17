@@ -24871,13 +24871,485 @@ async fn argocd_expansion_on_a_heading_does_nothing() {
     );
 }
 
+/// `⏎` on a managed resource of an Application deploying to a cluster a
+/// kubeconfig context serves switches to that context and opens the object
+/// there, scoped by name, once the switch lands.
+#[tokio::test]
+async fn argocd_view_enter_on_a_remote_resource_opens_it_in_its_context() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    // What the kubeconfig lookup (covered by
+    // `argocd_destination_classification`) would have produced for `west`.
+    app.argocd_destination = Destination::Context("west".into());
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some("west"),
+        "{}",
+        app.flash
+    );
+    assert_eq!(
+        app.pending_argocd_target
+            .as_ref()
+            .map(|j| j.resource.name.as_str()),
+        Some("web")
+    );
+    assert_ne!(app.mode, Mode::Argocd);
+
+    let hub = app.cluster.context.clone();
+    land_context(&mut app, "west");
+    assert_eq!(app.cluster.context, "west");
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "services");
+    assert_eq!(app.namespace, "default");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=web"));
+    assert!(app.pending_argocd_target.is_none());
+    assert!(app.flash.contains("in west"), "{}", app.flash);
+
+    // `esc` at the root of the jumped view goes back to the Application.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(hub.as_str()),
+        "{}",
+        app.flash
+    );
+    assert!(app.argocd_return.is_none());
+    land_context(&mut app, &hub);
+    assert_eq!(app.cluster.context, hub);
+    assert_eq!(app.mode, Mode::Argocd);
+    assert_eq!(app.argocd_title, "web — Argo CD");
+    assert_eq!(app.kind_plural, "applications");
+    assert_eq!(app.namespace, "default");
+    assert!(app.pending_argocd_return.is_none());
+}
+
+/// A kind the destination cluster does not know lands on pods with a warning
+/// — and `esc` from there still returns to the Application.
+#[tokio::test]
+async fn argocd_remote_jump_unknown_kind_falls_back_to_pods_and_esc_returns() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    // What Argo listed is a CRD the fake destination has never heard of.
+    app.argocd_resources[0].kind = "Widget".into();
+    app.argocd_resources[0].group = "example.com".into();
+    let hub = app.cluster.context.clone();
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    land_context(&mut app, "west");
+
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.flash.contains("west has no Widget"), "{}", app.flash);
+    assert!(
+        app.argocd_return.is_some(),
+        "the fallback view keeps the way back"
+    );
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(hub.as_str()),
+        "{}",
+        app.flash
+    );
+    land_context(&mut app, &hub);
+    assert_eq!(app.mode, Mode::Argocd);
+}
+
+/// `Tab` through the default kinds in the remote cluster is still browsing
+/// where the jump landed: the way back survives it, and `esc` at the root of
+/// whatever kind is showing returns to the Application.
+#[tokio::test]
+async fn argocd_remote_jump_return_survives_tab_cycling() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    let hub = app.cluster.context.clone();
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    land_context(&mut app, "west");
+    assert_eq!(app.kind_plural, "services");
+
+    app.handle_key(press(KeyCode::Tab)).unwrap();
+    assert_ne!(app.kind_plural, "services");
+    assert!(app.argocd_return.is_some(), "tab keeps the way back");
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(hub.as_str()),
+        "{}",
+        app.flash
+    );
+    land_context(&mut app, &hub);
+    assert_eq!(app.mode, Mode::Argocd);
+}
+
+/// Past the cap the view shows "… and N more": another indent-1 row that
+/// names no resource. `⏎` on it opens nothing — not the first hidden one.
+#[tokio::test]
+async fn argocd_view_summary_row_is_not_a_jump() {
+    use crate::argocd::Destination;
+    let mut root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    root["status"]["resources"] = serde_json::Value::Array(
+        (0..=crate::argocd::MAX_LISTED)
+            .map(|i| {
+                json!({"version": "v1", "kind": "Service", "namespace": "default",
+                       "name": format!("web-{i}"), "status": "Synced",
+                       "health": {"status": "Healthy"}})
+            })
+            .collect(),
+    );
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+
+    let summary = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "… and 1 more")
+        .expect("summary row");
+    app.argocd_state.select(Some(summary));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.context_switch_target.is_none());
+    assert!(app.flash.contains("live in west"), "{}", app.flash);
+}
+
+/// A destination name that resolves to a context serving the cluster we are
+/// connected to is local: rows carry ordinary targets and `⏎` opens the
+/// object here. Locality is decided by server, not by the context's name —
+/// the same name pointing at another server is remote, and `⏎` reconnects
+/// through it rather than treating the switch as a no-op.
+#[tokio::test]
+async fn argocd_destination_resolving_to_the_current_context_is_local() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "hub-cluster", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    let current = app.cluster.context.clone();
+    let index = |server: &str| {
+        let yaml = format!(
+            r#"
+contexts:
+  - name: {current}
+    context: {{ cluster: hub-cluster }}
+clusters:
+  - name: hub-cluster
+    cluster: {{ server: {server} }}
+"#
+        );
+        crate::k8s::ContextIndex::from_kubeconfig(&serde_yaml::from_str(&yaml).unwrap())
+    };
+
+    let here = app.cluster.cluster_url.clone();
+    app.context_index_override = Some(index(&here));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert_eq!(app.argocd_destination, Destination::Current);
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    assert!(app.argocd_items[row].target.is_some());
+
+    // The kubeconfig now points the connected context's name elsewhere.
+    app.context_index_override = Some(index("https://elsewhere.example"));
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    assert_eq!(
+        app.argocd_destination,
+        Destination::Context(current.clone())
+    );
+    assert!(app.argocd_items[row].target.is_none());
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_ne!(app.mode, Mode::Argocd);
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(current.as_str()),
+        "a reload through the same name, not a no-op: {}",
+        app.flash
+    );
+    land_context(&mut app, &current);
+    assert_eq!(app.kind_plural, "services");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=web"));
+}
+
+/// The switch back can fail (a transient connection error). The remote table
+/// is still on screen, so it keeps its way back and `esc` can try again.
+#[tokio::test]
+async fn argocd_remote_jump_failed_return_keeps_the_way_back() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    let hub = app.cluster.context.clone();
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    land_context(&mut app, "west");
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.argocd_return.is_none(), "taken for the switch");
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: hub.clone(),
+        result: Err("connection refused".into()),
+    });
+    assert!(app.flash.contains("context switch failed"), "{}", app.flash);
+    assert_eq!(app.cluster.context, "west");
+    assert!(app.argocd_return.is_some(), "handed back to the view");
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some(hub.as_str()),
+        "{}",
+        app.flash
+    );
+    land_context(&mut app, &hub);
+    assert_eq!(app.mode, Mode::Argocd);
+}
+
+/// An Application reporting no resources shows "none reported" under the
+/// heading: an indent-1 row that is not a resource, so `⏎` opens nothing.
+#[tokio::test]
+async fn argocd_view_none_reported_row_is_not_a_jump() {
+    use crate::argocd::Destination;
+    let mut root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    root["status"]["resources"] = json!([]);
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "none reported")
+        .expect("none reported row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.context_switch_target.is_none());
+    assert!(app.flash.contains("live in west"), "{}", app.flash);
+}
+
+/// `esc` comes back to the managed row the jump left, not to the top. The
+/// keys arm the row; the reopened view's report puts the cursor on it.
+#[tokio::test]
+async fn argocd_remote_jump_esc_returns_to_the_row_it_left() {
+    use crate::argocd::Destination;
+    let mut root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    root["status"]["resources"] = serde_json::Value::Array(
+        (0..5)
+            .map(|i| {
+                json!({"version": "v1", "kind": "Service", "namespace": "default",
+                       "name": format!("web-{i}"), "status": "Synced",
+                       "health": {"status": "Healthy"}})
+            })
+            .collect(),
+    );
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    let hub = app.cluster.context.clone();
+    let hub_client = app.cluster.client.clone();
+
+    let row = app.managed_row_at(3).expect("fourth managed row");
+    assert!(app.argocd_items[row].text.starts_with("Service/web-3:"));
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    land_context(&mut app, "west");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=web-3"));
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    land_context(&mut app, &hub);
+    assert_eq!(app.mode, Mode::Argocd);
+    assert_eq!(
+        app.argocd_reselect,
+        Some(3),
+        "armed for the reopened view's report"
+    );
+
+    // The plain fake the landing installed cannot serve the re-read; give the
+    // reopened view the hub's mock and gather again with the row still armed.
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.cluster.client = hub_client;
+    app.argocd_reselect = Some(3);
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    receive_argocd_report(&mut app, &mut rx).await;
+    let selected = app.argocd_state.selected().expect("selection");
+    assert_eq!(Some(selected), app.managed_row_at(3));
+    assert!(
+        app.argocd_items[selected]
+            .text
+            .starts_with("Service/web-3:"),
+        "{}",
+        app.argocd_items[selected].text
+    );
+    assert_eq!(app.argocd_reselect, None, "consumed by the report");
+}
+
+/// Leaving the jumped view for another root view drops the way back: `esc`
+/// there is an ordinary root `esc`, not a context switch.
+#[tokio::test]
+async fn argocd_remote_jump_return_is_dropped_by_a_new_root_view() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    land_context(&mut app, "west");
+    assert!(app.argocd_return.is_some());
+
+    type_resource_query(&mut app, "pods");
+    assert_eq!(app.kind_plural, "pods");
+    assert!(app.argocd_return.is_none());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert!(app.context_switch_target.is_none());
+    assert_eq!(app.cluster.context, "west");
+}
+
+/// A heading or a source line under a remote destination still has nothing to
+/// open: no switch starts, and the flash says why.
+#[tokio::test]
+async fn argocd_view_enter_on_a_remote_heading_does_not_switch() {
+    use crate::argocd::Destination;
+    let root = argocd_application(json!({"name": "west", "namespace": "default"}));
+    let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
+    let kind = app.kind.as_ref().unwrap();
+    let path = format!(
+        "/apis/{}/namespaces/default/applications/web",
+        kind.ar.api_version
+    );
+    responses.lock().unwrap().insert(path, (200, root));
+
+    open_argocd_view(&mut app);
+    receive_argocd_report(&mut app, &mut rx).await;
+    app.argocd_destination = Destination::Context("west".into());
+
+    let heading = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text == "Source")
+        .expect("heading");
+    app.argocd_state.select(Some(heading));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+
+    assert!(app.context_switch_target.is_none());
+    assert_eq!(app.mode, Mode::Argocd);
+    assert!(app.flash.contains("live in west"), "{}", app.flash);
+}
+
 /// A destination registered under Argo's spelling resolves, through the
 /// kubeconfig, to the context that actually serves it — an alias when that is
-/// what the kubeconfig has — and `⏎` names that alias. A stale context named
-/// exactly like the destination but pointing at a missing cluster must not
-/// win over it.
+/// what the kubeconfig has — and `⏎` switches to that alias. A stale context
+/// named exactly like the destination but pointing at a missing cluster must
+/// not win over it.
 #[tokio::test]
-async fn argocd_view_enter_names_the_alias_context_for_a_remote_name() {
+async fn argocd_view_enter_switches_to_the_alias_context_for_a_remote_name() {
     let root = argocd_application(json!({"name": "eks-prod-general", "namespace": "default"}));
     let (mut app, mut rx, responses, _) = health_report_app("applications", root.clone());
     let kind = app.kind.as_ref().unwrap();
@@ -24914,27 +25386,28 @@ clusters:
             open_argocd_view(&mut app);
         }
         receive_argocd_report(&mut app, &mut rx).await;
-
-        let row = app
-            .argocd_items
-            .iter()
-            .position(|f| f.text.starts_with("Service/web:"))
-            .expect("managed resource row");
-        app.argocd_state.select(Some(row));
-        app.handle_key(press(KeyCode::Enter)).unwrap();
-        assert_eq!(app.mode, Mode::Argocd);
-        assert!(
-            app.flash.contains("switch with :ctx prod"),
-            "stale={stale}: {}",
-            app.flash
-        );
-        assert!(!app.flash.contains("eks-prod-general"), "{}", app.flash);
-        assert!(
-            !app.flash.contains("no kubeconfig context serves"),
-            "{}",
-            app.flash
+        assert_eq!(
+            app.argocd_destination,
+            crate::argocd::Destination::Context("prod".into()),
+            "stale={stale}"
         );
     }
+
+    // `⏎` on a managed resource goes through the alias, not Argo's spelling.
+    let row = app
+        .argocd_items
+        .iter()
+        .position(|f| f.text.starts_with("Service/web:"))
+        .expect("managed resource row");
+    app.argocd_state.select(Some(row));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_ne!(app.mode, Mode::Argocd);
+    assert_eq!(
+        app.context_switch_target.as_ref().map(|(_, n)| n.as_str()),
+        Some("prod"),
+        "{}",
+        app.flash
+    );
 }
 
 /// A remote destination has no jump targets, so there is nothing to walk —
@@ -24983,7 +25456,7 @@ fn argocd_destination_classification() {
     let here = "https://rancher.example/k8s/clusters/c-abc";
 
     let classify = |server: &str, name: &str| {
-        super::argocd::classify_destination(server, name, here, none, no_contexts)
+        super::argocd::classify_destination(server, name, here, none, none, no_contexts)
     };
 
     // The service URL, in each spelling Argo may write.
@@ -25023,6 +25496,7 @@ fn argocd_destination_classification() {
             "https://other.example:6443",
             "",
             here,
+            none,
             |_| Some("prod-eu".to_string()),
             no_contexts
         ),
@@ -25031,7 +25505,7 @@ fn argocd_destination_classification() {
     // A context named `in-cluster` wins over the convention, so a remote
     // cluster registered under that name cannot pass as the local one.
     assert_eq!(
-        super::argocd::classify_destination("", "in-cluster", here, none, |n| {
+        super::argocd::classify_destination("", "in-cluster", here, none, none, |n| {
             (n == "in-cluster").then(|| n.to_string())
         }),
         Destination::Context("in-cluster".into())
@@ -25039,10 +25513,44 @@ fn argocd_destination_classification() {
     // A registered name resolves to whatever context the kubeconfig lookup
     // names for it — the alias, not the Argo spelling.
     assert_eq!(
-        super::argocd::classify_destination("", "eks-prod-general", here, none, |_| {
+        super::argocd::classify_destination("", "eks-prod-general", here, none, none, |_| {
             Some("prod".to_string())
         }),
         Destination::Context("prod".into())
+    );
+    // A name (or server) that resolves to a context serving the connected
+    // cluster is local: switching to it would be a no-op with nothing to land
+    // the jump. Locality is by server — the same context *name* pointing at
+    // another server stays remote.
+    let serves_here = |c: &str| (c == "hub").then(|| format!("{here}/"));
+    let serves_elsewhere = |c: &str| (c == "hub").then(|| "https://other.example".to_string());
+    assert_eq!(
+        super::argocd::classify_destination("", "hub-cluster", here, serves_here, none, |_| {
+            Some("hub".to_string())
+        }),
+        Destination::Current
+    );
+    assert_eq!(
+        super::argocd::classify_destination(
+            "",
+            "hub-cluster",
+            here,
+            serves_elsewhere,
+            none,
+            |_| Some("hub".to_string())
+        ),
+        Destination::Context("hub".into())
+    );
+    assert_eq!(
+        super::argocd::classify_destination(
+            "https://hub.example",
+            "",
+            here,
+            serves_here,
+            |_| Some("hub".to_string()),
+            no_contexts
+        ),
+        Destination::Current
     );
 }
 
