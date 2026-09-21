@@ -18375,6 +18375,7 @@ async fn cancelling_and_replacing_plugins_rejects_stale_results() {
     plugin_command(&mut app, "plugin-cancel");
     assert!(app.plugin_task.is_none());
     app.handle_msg(Msg::PluginOutput {
+        action: None,
         run,
         generation: app.generation,
         claim,
@@ -27503,6 +27504,7 @@ async fn describe_refresh_does_not_replace_plugin_output_and_fallback_refreshes_
     let generation = app.refresh_generation;
     let claim = app.claim_status("plugin");
     app.handle_msg(Msg::PluginOutput {
+        action: None,
         run: app.plugin_run,
         generation: app.generation,
         claim,
@@ -32622,6 +32624,7 @@ async fn plugin_activity_ctrl_c_kills_descendants_and_rejects_stale_completion_a
     assert!(!app.should_quit);
     assert!(app.plugin_task.is_none());
     app.handle_msg(Msg::PluginOutput {
+        action: None,
         run,
         generation: app.generation,
         claim,
@@ -34175,4 +34178,176 @@ async fn context_namespace_policy_preserves_bookmarks_workspaces_and_launch_scop
         }
     }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn kubeconfig_reload_plugin() -> crate::config::Plugin {
+    let mut plugin = named_plugin(
+        "/bin/echo",
+        &[r#"{"schema_version":1,"title":"Cluster ready","action":"reload-kubeconfig"}"#],
+    );
+    plugin.target = Some("context".into());
+    plugin.output = Some("report".into());
+    plugin
+}
+
+#[tokio::test]
+async fn plugin_reload_opens_contexts_and_reconnects_only_after_enter() {
+    let (mut app, mut rx) = test_app();
+    app.cluster.connected = true;
+    let context = app.cluster.context.clone();
+    let generation = app.generation;
+    app.plugins = vec![kubeconfig_reload_plugin()];
+    plugin_command(&mut app, "example-plugin");
+    app.handle_msg(plugin_result(&mut rx).await);
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(app.ctx_reload);
+    assert_eq!(app.generation, generation);
+    assert_eq!(app.cluster.context, context);
+    assert!(app.plugin_activity.as_ref().unwrap().result.is_some());
+    app.handle_msg(Msg::Contexts {
+        generation,
+        list: vec![context.clone()],
+    });
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.generation > generation);
+    assert_eq!(app.context_switch_target.as_ref().unwrap().1, context);
+    assert!(app.ctx_reload);
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: context.clone(),
+        result: Err("test connection failure".into()),
+    });
+    plugin_command(&mut app, "ctx");
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec![context.clone()],
+    });
+    let retry_generation = app.generation;
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.generation > retry_generation);
+    app.handle_msg(Msg::ContextSwitched {
+        generation: app.generation,
+        name: context,
+        result: Ok(Box::new(Cluster::fake())),
+    });
+    assert!(!app.ctx_reload);
+}
+
+#[tokio::test]
+async fn plugin_reload_cancel_keeps_connection_and_later_selection_reconnects() {
+    let (mut app, mut rx) = test_app();
+    app.cluster.connected = true;
+    let context = app.cluster.context.clone();
+    let generation = app.generation;
+    app.plugins = vec![kubeconfig_reload_plugin()];
+    plugin_command(&mut app, "example-plugin");
+    app.handle_msg(plugin_result(&mut rx).await);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.generation, generation);
+    assert!(app.cluster.connected);
+    plugin_command(&mut app, "ctx");
+    app.handle_msg(Msg::Contexts {
+        generation,
+        list: vec![context],
+    });
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.generation > generation);
+}
+
+#[tokio::test]
+async fn plugin_reload_ignores_failed_invalid_and_plain_output() {
+    for case in ["exit", "invalid", "unknown", "popup", "timeout"] {
+        let (mut app, mut rx) = test_app();
+        let mut plugin = kubeconfig_reload_plugin();
+        match case {
+            "exit" => {
+                plugin.command = "/bin/sh".into();
+                plugin.args = vec![
+                    "-c".into(),
+                    format!("printf '%s' '{}'; exit 1", plugin.args[0]),
+                ];
+            }
+            "invalid" => {
+                plugin.args[0] = r#"{"schema_version":1,"title":"Bad","action":"reload-kubeconfig","sections":[{"title":"Bad","columns":["A"],"rows":[[]]}]}"#.into();
+            }
+            "unknown" => {
+                plugin.args[0] = plugin.args[0].replace("reload-kubeconfig", "switch-context");
+            }
+            "popup" => plugin.output = Some("popup".into()),
+            "timeout" => {
+                plugin.command = "/bin/sh".into();
+                plugin.args = vec![
+                    "-c".into(),
+                    format!("printf '%s' '{}'; sleep 10", plugin.args[0]),
+                ];
+                plugin.timeout = Some("1s".into());
+            }
+            _ => unreachable!(),
+        }
+        app.plugins = vec![plugin];
+        plugin_command(&mut app, "example-plugin");
+        app.handle_msg(plugin_result(&mut rx).await);
+        assert_eq!(app.mode, Mode::Detail, "{case}");
+        assert!(!app.ctx_reload, "{case}");
+        assert_eq!(app.flash_err, case != "popup", "{case}");
+    }
+}
+
+#[tokio::test]
+async fn plugin_reload_ignores_cancelled_and_stale_completions() {
+    for case in ["cancel", "run", "generation"] {
+        let (mut app, mut rx) = test_app();
+        app.plugins = vec![kubeconfig_reload_plugin()];
+        plugin_command(&mut app, "example-plugin");
+        let mut result = plugin_result(&mut rx).await;
+        match case {
+            "cancel" => plugin_command(&mut app, "plugin-cancel"),
+            "run" => {
+                if let Msg::PluginOutput { run, .. } = &mut result {
+                    *run = run.wrapping_sub(1);
+                }
+            }
+            "generation" => {
+                if let Msg::PluginOutput { generation, .. } = &mut result {
+                    *generation = generation.wrapping_sub(1);
+                }
+            }
+            _ => unreachable!(),
+        }
+        app.handle_msg(result);
+        assert_ne!(app.mode, Mode::Contexts, "{case}");
+        assert!(!app.ctx_reload, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn plugin_reload_updates_context_command_completion() {
+    for contexts in [vec!["added".to_string(), "renamed".to_string()], vec![]] {
+        let (mut app, mut rx) = test_app();
+        app.all_contexts = vec!["removed".into(), "old-name".into()];
+        app.plugins = vec![kubeconfig_reload_plugin()];
+        plugin_command(&mut app, "example-plugin");
+        app.handle_msg(plugin_result(&mut rx).await);
+        app.handle_msg(Msg::Contexts {
+            generation: app.generation,
+            list: contexts.clone(),
+        });
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        app.handle_key(press(KeyCode::Char(':'))).unwrap();
+        for c in "ctx ".chars() {
+            app.handle_key(press(KeyCode::Char(c))).unwrap();
+        }
+        let suggestions: Vec<_> = app
+            .cmd_suggestions
+            .iter()
+            .map(|s| s.label.clone())
+            .collect();
+        assert_eq!(suggestions, contexts);
+        app.handle_msg(Msg::Contexts {
+            generation: app.generation.wrapping_sub(1),
+            list: vec!["stale".into()],
+        });
+        assert_eq!(app.all_contexts, contexts);
+    }
 }
