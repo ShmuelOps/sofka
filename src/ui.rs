@@ -3181,7 +3181,7 @@ fn draw_namespaces(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Namespaces · /{}_ ", app.ns_filter)
     };
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3228,7 +3228,7 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         " Contexts (type to filter) ".to_string()
     };
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3272,7 +3272,7 @@ fn draw_sort_picker(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Sort by · /{}_ ", app.sort_picker_filter)
     };
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3309,7 +3309,7 @@ fn draw_copy_picker(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!(" Copy · /{}_ ", app.copy_picker_filter)
     };
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3350,7 +3350,7 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         "Flux"
     };
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3382,7 +3382,7 @@ fn draw_port_forward_picker(frame: &mut Frame, app: &mut App, area: Rect) {
             Text::from(Span::styled(label.as_str(), Style::default().fg(color)))
         })
         .collect();
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3413,7 +3413,7 @@ fn draw_transfer_menu(frame: &mut Frame, app: &mut App, area: Rect) {
             Text::from(Span::styled(*label, Style::default().fg(color)))
         })
         .collect();
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3612,7 +3612,7 @@ fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
             ))
         })
         .collect();
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3635,7 +3635,7 @@ fn draw_snapshots(frame: &mut Frame, app: &mut App, area: Rect) {
             ))
         })
         .collect();
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -3974,6 +3974,7 @@ fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol("▌ ")
         .highlight_spacing(HighlightSpacing::Always);
     frame.render_stateful_widget(list, list_area, &mut app.container_state);
+    app.picker_page_items = usize::from(list_area.height);
     draw_border_scrollbar(
         frame,
         show_scrollbars,
@@ -4064,7 +4065,7 @@ fn draw_set_image(frame: &mut Frame, app: &mut App, area: Rect) {
             ]))
         })
         .collect();
-    render_popup_list(
+    app.picker_page_items = render_popup_list(
         frame,
         show_scrollbars,
         area,
@@ -5425,7 +5426,8 @@ fn render_popup_list<'a, T>(
     items: Vec<Text<'a>>,
     title: T,
     state: &mut ListState,
-) where
+) -> usize
+where
     T: Into<Line<'a>>,
 {
     let area = centered_rect_with_min(90, 80, 0, 0, area);
@@ -5491,6 +5493,7 @@ fn render_popup_list<'a, T>(
             .highlight_spacing(HighlightSpacing::Always);
         frame.render_stateful_widget(list, list_area, state);
         let visible = usize::from(list_area.height);
+        let page = visible_items(&heights, state.offset(), visible);
         draw_border_scrollbar(
             frame,
             show_scrollbars,
@@ -5504,9 +5507,31 @@ fn render_popup_list<'a, T>(
             visible,
             false,
         );
+        page
     } else {
+        let heights: Vec<_> = wrapped.iter().map(ListItem::height).collect();
         render_framed_list(frame, show_scrollbars, popup, wrapped, title, state);
+        visible_items(
+            &heights,
+            state.offset(),
+            usize::from(popup.height.saturating_sub(2)),
+        )
     }
+}
+
+/// How many items starting at `offset` fit in `rows`, so a page move skips
+/// what is on screen even when items wrap onto several rows.
+fn visible_items(heights: &[usize], offset: usize, rows: usize) -> usize {
+    let mut used = 0;
+    let fit = heights
+        .iter()
+        .skip(offset)
+        .take_while(|&&h| {
+            used += h;
+            used <= rows
+        })
+        .count();
+    fit.max(1)
 }
 
 fn render_framed_list<'a, T>(
