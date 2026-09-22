@@ -312,7 +312,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   the previous keymap. Legacy palette settings are migrated with a config
   backup; managed files produce a warning and use the converted keys in memory.
   See [Configure key bindings](keybindings.md).
-- **Mouse support** - the wheel scrolls every view (one wheel event is three
+- **Mouse support** - mouse capture is off by default for terminal text
+  selection. Set `mouse = true` to enable mouse controls at startup.
+  With capture on, the wheel scrolls every view (one wheel event is three
   steps of that view's own up/down; `mouse_scroll_lines` tunes this in views
   with mouse capture), clicking a row selects it, clicking a column header
   sorts by it (click again to flip). Document views (YAML/describe, diff,
@@ -320,7 +322,9 @@ concurrent drains, and full kubectl drain parity are outside this feature.
   text natively; the wheel still scrolls them in terminals that translate it to
   arrow keys in the alternate screen (kitty, Ghostty, iTerm2, ...), at the
   terminal's own speed, not `mouse_scroll_lines`. Set
-  `mouse = false` to keep the terminal's native mouse behavior everywhere.
+  `mouse = false` to start with the terminal's native mouse behavior everywhere.
+  Use `:mouse` to switch capture on or off for the current session. With capture
+  off, drag to select text. This command does not change the configuration file.
   sofka also releases the mouse while a suspended command (`kubectl exec`,
   `$EDITOR`) runs.
 - **Compact mode** (`ctrl-e`) - collapse the seven-line header and the footer
